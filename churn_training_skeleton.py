@@ -18,8 +18,8 @@ product -- read it before you create anything.
 
 Usage (local testing):
     python churn_training_skeleton.py \
-        --feature-group-name northstar-churn-features \
-        --artifacts-bucket northstar-dev-artifacts \
+        --feature-group-name northstar-dev-customer-features \
+        --artifacts-bucket northstar-dev-data-<account> \
         --max-depth 6 --eta 0.1 --num-round 200 \
         --mlflow-arn arn:aws:sagemaker:us-east-1:<account>:mlflow-app/app-XXXX \
         --run-name xgb-depth6-eta0.1
@@ -80,14 +80,25 @@ def parse_args():
     parser = argparse.ArgumentParser(description="NorthStar churn prediction training")
 
     # Data configuration
-    parser.add_argument("--feature-group-name", type=str, default="northstar-churn-features",
-                        help="SageMaker Feature Store feature group name")
-    parser.add_argument("--training-start-date", type=str, default="2025-02-01",
-                        help="Start date for training data window (YYYY-MM-DD)")
-    parser.add_argument("--training-end-date", type=str, default="2026-06-01",
-                        help="End date for training data window (YYYY-MM-DD)")
+    # Names come from Lab 2's Terraform: `terraform output -raw feature_group_name`
+    # and `terraform output -raw s3_bucket_name`. Do not invent new ones.
+    parser.add_argument("--feature-group-name", type=str,
+                        default="northstar-dev-customer-features",
+                        help="SageMaker Feature Store feature group name (Lab 2 output)")
+    # These dates bound the INGEST batch, not the feature window. Lab 2 stamps
+    # event_time with the wall-clock time its Glue job ran (time.time()), not
+    # with the feature cutoff T = 2026-04-01 -- T was already enforced when the
+    # features were computed. A window that ends before your Lab 2 run (the old
+    # default here was 2026-06-01) matches zero rows. These defaults match the
+    # reference implementation and cover any Lab 2 run during the semester.
+    parser.add_argument("--training-start-date", type=str, default="2026-01-01",
+                        help="Earliest Lab 2 ingest date to include (YYYY-MM-DD)")
+    parser.add_argument("--training-end-date", type=str, default="2027-01-01",
+                        help="Latest Lab 2 ingest date to include (YYYY-MM-DD)")
     parser.add_argument("--artifacts-bucket", type=str, required=True,
-                        help="S3 bucket for model artifacts")
+                        help="Your Lab 1 data bucket, northstar-dev-data-<account>. "
+                             "Athena results and model artifacts go under its artifacts/ "
+                             "prefix, the only prefix your MLEngineer role can write")
     parser.add_argument("--local-data-path", type=str, default=None,
                         help="Path to local feature CSV for development testing (bypasses Feature Store)")
 
@@ -698,13 +709,14 @@ def save_and_register_model(model: xgb.Booster,
         json.dump(metadata, f, indent=2)
 
     # TODO: Register in SageMaker Model Registry
-    # The model package group should be "northstar-churn-model-group"
+    # The model package group must be "northstar-churn-models" -- Lab 5 deploys
+    # from that group by name, so any other name breaks Lab 5.
     # Include the evaluation metrics in the model card / description
     # Status must be "PendingManualApproval" — never "Approved" from this script
     #
     # sm_client = boto3.client("sagemaker")
     # sm_client.create_model_package(
-    #     ModelPackageGroupName="northstar-churn-model-group",
+    #     ModelPackageGroupName="northstar-churn-models",
     #     ModelPackageDescription=f"Churn model trained {datetime.utcnow().date()}",
     #     InferenceSpecification={...},
     #     ModelApprovalStatus="PendingManualApproval",
