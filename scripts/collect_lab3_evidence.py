@@ -53,7 +53,8 @@ EVIDENCE_FILES_TRACK = {
     "C": [("docs/lab3-evidence/agent_eval.csv",     "Task 2C: evaluation_harness.py --track C output, renamed"),
           ("docs/lab3-evidence/agent-traces.jsonl", "Task 2C: one JSON line per tool call (tool, input, output, latency_ms)"),
           ("docs/lab3-evidence/agent-cost.csv",     "Task 2C: tokens and cost per run"),
-          ("docs/lab3-evidence/track-c-failures.md", "Task 2C: >=2 failure modes, each with a concrete fix")],
+          ("docs/lab3-evidence/track-c-failures.md", "Task 2C: >=2 failure modes, each with a concrete fix"),
+          ("docs/lab3-evidence/policy-tests.json",  "Task 2C: python agent/policy_tests.py (the $50 cap, enforced at the gateway)")],
 }
 SHARED_METRICS = ("auc_roc", "precision_top10", "recall_top10")
 TOL = 6e-5            # every figure is rounded to 4 dp; allow for that only
@@ -79,6 +80,48 @@ def as_float(v):
 
 
 # ── AWS exports ──────────────────────────────────────────────────────────────
+
+def export_agentcore(sess, out):
+    """Track C: what the TA cannot see in your account. Harness settings, the
+    gateway and its tools, and every Cedar policy, as AgentCore recorded them."""
+    c = sess.client("bedrock-agentcore-control")
+    harnesses = c.list_harnesses().get("harnesses", [])
+    if not harnesses:
+        report("FAIL", "AgentCore harness", "none found. Run this BEFORE teardown, while the stack is up")
+        return
+    doc = {"harnesses": [], "gateways": [], "policy_engines": []}
+    for h in harnesses:
+        hid = h.get("harnessId") or h["arn"].split("/")[-1]
+        d = c.get_harness(harnessId=hid)
+        d = d.get("harness", d)
+        d.pop("ResponseMetadata", None)
+        env = (d.get("environment") or {}).get("agentCoreRuntimeEnvironment", {})
+        idle = (env.get("lifecycleConfiguration") or {}).get("idleRuntimeSessionTimeout")
+        doc["harnesses"].append(d)
+        if idle is None or idle > 300:
+            report("WARN", f"harness {d.get('harnessName')}", f"idle timeout {idle}s. Runtime memory bills for every idle second; use 60")
+        else:
+            report("OK", f"harness {d.get('harnessName')}", f"idle timeout {idle}s, {len(d.get('tools') or [])} tool source(s)")
+    for g in c.list_gateways().get("items", []):
+        gd = c.get_gateway(gatewayIdentifier=g["gatewayId"])
+        gd.pop("ResponseMetadata", None)
+        gd["targets"] = c.list_gateway_targets(gatewayIdentifier=g["gatewayId"]).get("items", [])
+        doc["gateways"].append(gd)
+        mode = (gd.get("policyEngineConfiguration") or {}).get("mode")
+        report("OK" if mode == "ENFORCE" else "FAIL", f"gateway {gd.get('name')}", f"policy engine mode {mode}")
+    for e in c.list_policy_engines().get("policyEngines", []):
+        pols = []
+        for pol in c.list_policies(policyEngineId=e["policyEngineId"]).get("policies", []):
+            pd = c.get_policy(policyEngineId=e["policyEngineId"], policyId=pol["policyId"])
+            pd.pop("ResponseMetadata", None)
+            pols.append(pd)
+        doc["policy_engines"].append({"engine": e, "policies": pols})
+        stmts = " ".join(json.dumps(p.get("definition", {})) for p in pols)
+        has_forbid = "forbid" in stmts and "apply_loyalty_credit" in stmts
+        report("OK" if has_forbid else "FAIL", f"policy engine {e.get('name')}",
+               f"{len(pols)} policies" + ("" if has_forbid else "; no forbid on apply_loyalty_credit (TODO 3)"))
+    dump(os.path.join(out, "agentcore-config.json"), doc)
+
 
 def export_identity(sess, out):
     ident = sess.client("sts").get_caller_identity()
@@ -324,6 +367,14 @@ def check_track(track):
                 report("FAIL", "agent-traces.jsonl", f"{len(recs)} records, {bad} unparseable, missing fields {lacking}")
             else:
                 report("OK", "agent-traces.jsonl", f"{len(recs)} tool calls")
+        p = "docs/lab3-evidence/policy-tests.json"
+        if os.path.isfile(p):
+            rs = json.load(open(p)).get("results", [])
+            over = [r for r in rs if r.get("tool") == "apply_loyalty_credit" and (r.get("arguments") or {}).get("amount", 0) > 50]
+            if over and all(r.get("decision") == "DENY" for r in over):
+                report("OK", "policy-tests.json", f"{len(over)} over-cap credits denied at the gateway")
+            else:
+                report("FAIL", "policy-tests.json", "an over-cap credit was not denied. Check TODO 3 and re-run agent/policy_tests.py")
     p = f"docs/lab3-evidence/{'rag' if track == 'B' else 'agent'}_eval.csv"
     if os.path.isfile(p):
         with open(p, newline="") as f:
@@ -357,11 +408,12 @@ def main():
     check_slices()
     check_notebook()
     check_track(a.track)
-    print("[4/5] AWS exports: Athena, MLflow, Model Registry")
+    print("[4/5] AWS exports: Athena, MLflow, Model Registry" + (", AgentCore" if a.track == "C" else ""))
     log = open(f"{out}/train-final.log", errors="replace").read() if os.path.isfile(f"{out}/train-final.log") else None
     for step in (lambda: export_athena(sess, out, log),
                  lambda: export_mlflow(sess, out, a.mlflow_app_name, a.experiment, m),
-                 lambda: export_registry(sess, out, a.model_package_group, m)):
+                 lambda: export_registry(sess, out, a.model_package_group, m),
+                 *([lambda: export_agentcore(sess, out)] if a.track == "C" else [])):
         try:
             step()
         except Exception as e:          # one failed export must not hide the others
