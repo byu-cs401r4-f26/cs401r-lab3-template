@@ -656,6 +656,13 @@ class LocalAgentEvaluator(AgentEvaluator):
             "escalated": escalated,
             "escalation_expected": tc.should_escalate,
             "response": result["response"],
+            # The inherited run() and _print_summary() read these names. Without
+            # them LocalAgentEvaluator(...).run() raised KeyError: 'tool_calls_made'
+            # (fixed 2026-10-14).
+            "tool_calls_made": tool_calls,
+            "missing_required_tools": missing_required,
+            "unexpected_forbidden_tools": unexpected_forbidden,
+            "escalation_correct": escalation_correct,
         }
 
 
